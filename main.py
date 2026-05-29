@@ -1,155 +1,151 @@
-import sys
 import os
-
-import neat
+import sys
+import argparse
 import pygame
+import numpy as np
 
-from game_env import GameEnv, WIN_W, WIN_H, PIPE_GAP, Colors
-import visualizer
-
-
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config-feedforward.txt")
+from game_env import FlappyBirdEnv, load_sprites, draw_sprite_frame, draw_score, WIN_W, WIN_H, GROUND_H, GRAVITY
+from dqn_agent import DQNAgent
 
 
-def make_inputs(bird, game):
-    pipe = game.get_next_pipe(bird)
-    if pipe is None:
-        return [bird.y / WIN_H, bird.vel / 10, 1.0, 0.5]
-    return [
-        bird.y / WIN_H,
-        bird.vel / 10,
-        (pipe.x - bird.x) / WIN_W,
-        (pipe.gap_top + PIPE_GAP / 2) / WIN_H,
-    ]
+MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
+MODEL_PATH = os.path.join(MODELS_DIR, "best_model.pth")
+N_EPISODES = 1000
+REPORT_EVERY = 10
 
 
-def main():
+def train():
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    env = FlappyBirdEnv()
+    agent = DQNAgent()
+
+    best_reward = -float("inf")
+    recent_rewards = []
+
+    header = f"{'Ep':>6} | {'Reward':>8} | {'Eps':>6} | {'Avg':>8} | {'Best':>8} | {'Score':>5}"
+    print(header)
+    print("-" * len(header))
+
+    for ep in range(1, N_EPISODES + 1):
+        state = env.reset()
+        total_reward = 0
+        done = False
+
+        while not done:
+            action = agent.act(state)
+            next_state, reward, done, info = env.step(action)
+            agent.memory.push(state, action, reward, next_state, done)
+            state = next_state
+            total_reward += reward
+            agent.train()
+
+        agent.epsilon = max(agent.epsilon_min, agent.epsilon * agent.epsilon_decay)
+
+        recent_rewards.append(total_reward)
+        if len(recent_rewards) > 100:
+            recent_rewards.pop(0)
+        avg_reward = np.mean(recent_rewards) if recent_rewards else total_reward
+
+        if total_reward > best_reward:
+            best_reward = total_reward
+            agent.save(MODEL_PATH)
+
+        if ep % REPORT_EVERY == 0 or ep == 1:
+            print(f"{ep:6d} | {total_reward:8.0f} | {agent.epsilon:6.4f} | {avg_reward:8.1f} | {best_reward:8.0f} | {env.bird.score:5d}", flush=True)
+
+    print(f"\nTraining complete! Best reward: {best_reward:.0f}", flush=True)
+    print(f"Model saved to: {MODEL_PATH}\n", flush=True)
+
+
+def play():
     pygame.init()
-    pygame.display.set_caption("RL Flappy Bird — NEAT Evolution")
     screen = pygame.display.set_mode((WIN_W, WIN_H))
+    pygame.display.set_caption("Flappy Bird - DQN Agent")
     clock = pygame.time.Clock()
-    visualizer.init_fonts()
+    font = pygame.font.SysFont("arial", 18, bold=True)
 
-    config = neat.Config(
-        neat.DefaultGenome,
-        neat.DefaultReproduction,
-        neat.DefaultSpeciesSet,
-        neat.DefaultStagnation,
-        CONFIG_PATH,
-    )
+    sprites = load_sprites()
+    if sprites is None:
+        print("ERROR: Could not load sprites. Check sprites_repo/sprites/ directory.")
+        pygame.quit()
+        sys.exit(1)
 
-    pop = neat.Population(config)
-    pop.add_reporter(neat.StdOutReporter(True))
-    pop.add_reporter(neat.StatisticsReporter())
+    env = FlappyBirdEnv(max_frames=None)
+    agent = DQNAgent()
+    agent.load(MODEL_PATH)
+    agent.epsilon = 0.0
 
-    viz = visualizer.Visualizer()
+    state = env.reset()
     running = True
-    gen_counter = 0
-
-    def eval_genomes(genomes, config):
-        nonlocal running, gen_counter
-        gen_counter += 1
-        gen = gen_counter
-
-        game = GameEnv()
-        bird_map = {}
-
-        for genome_id, genome in genomes:
-            genome.fitness = 0.0
-            net = neat.nn.FeedForwardNetwork.create(genome, config)
-            bird = game.add_bird(120, WIN_H // 2)
-            bird_map[bird] = (genome, net)
-
-        timeout = 6000
-
-        while game.alive_count > 0 and game.frame < timeout:
-            clock.tick(60 * viz.speed)
-
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-                    return
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
-                        running = False
-                        return
-                    elif event.key in (pygame.K_UP, pygame.K_EQUALS):
-                        viz.speed_up()
-                    elif event.key in (pygame.K_DOWN, pygame.K_MINUS):
-                        viz.speed_down()
-
-            for bird in game.alive_birds:
-                _, net = bird_map[bird]
-                output = net.activate(make_inputs(bird, game))
-                if output[0] > 0.5:
-                    bird.jump()
-
-            game.update()
-
-            for bird, (genome, _) in bird_map.items():
-                if bird.alive:
-                    genome.fitness = bird.frames + bird.score * 100
-
-            best_genome = max(
-                (g for _, g in genomes if g.fitness is not None),
-                key=lambda g: g.fitness,
-                default=None,
-            )
-
-            screen.fill((0, 0, 0))
-            game.draw(screen)
-
-            best_fit = int(best_genome.fitness) if best_genome else 0
-            viz.draw_hud(screen, gen, game.alive_count, len(genomes), best_fit, viz.speed)
-            viz.draw_fitness_graph(screen)
-            if best_genome:
-                viz.draw_nn(screen, best_genome, config)
-
-            controls = visualizer.FONT_SM.render(
-                "[UP]/[DOWN] speed   [R] restart   [ESC] quit",
-                True,
-                Colors.GRAY,
-            )
-            screen.blit(controls, (10, WIN_H - 22))
-
-            if game.alive_count == 0 and game.frame <= 10:
-                done_txt = pygame.font.SysFont("consolas", 28, bold=True).render(
-                    "ALL BIRDS DIED — EVOLVING...", True, (255, 80, 80)
-                )
-                screen.blit(done_txt, (WIN_W // 2 - 200, WIN_H // 2 - 14))
-
-            pygame.display.flip()
-
-        for bird, (genome, _) in bird_map.items():
-            genome.fitness = bird.frames + bird.score * 100
-
-        best_fit = int(max((g.fitness for _, g in genomes), default=0))
-        avg_fit = int(
-            sum(g.fitness for _, g in genomes) / len(genomes) if genomes else 0
-        )
-        viz.record_generation(gen, best_fit, avg_fit, game.alive_count, len(genomes))
+    game_over = False
+    death_timer = 0
 
     while running:
-        pop.run(eval_genomes, 1)
-
-        if not running:
-            break
+        clock.tick(60)
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_r:
-                    pop = neat.Population(config)
-                    pop.add_reporter(neat.StdOutReporter(True))
-                    pop.add_reporter(neat.StatisticsReporter())
-                    viz = visualizer.Visualizer()
-                    gen_counter = 0
-                elif event.key == pygame.K_ESCAPE:
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
                     running = False
+                if event.key == pygame.K_r:
+                    state = env.reset()
+                    game_over = False
+                    death_timer = 0
+
+        if game_over:
+            env.bird.vel += GRAVITY
+            env.bird.y += env.bird.vel
+            death_timer += 1
+            if death_timer > 45:
+                state = env.reset()
+                game_over = False
+                death_timer = 0
+        else:
+            action = agent.act(state, eval_mode=True)
+            next_state, reward, done, _ = env.step(action)
+            state = next_state
+            if done:
+                game_over = True
+
+        draw_sprite_frame(screen, env, sprites)
+        draw_score(screen, env.bird.score, sprites)
+
+        info_lines = [
+            f"Score: {env.bird.score}",
+            f"Frames: {env.frame}",
+        ]
+        for i, line in enumerate(info_lines):
+            txt = font.render(line, True, (255, 255, 255))
+            screen.blit(txt, (12, 12 + i * 22))
+
+        controls = font.render("R: reset | ESC: quit", True, (255, 255, 255))
+        screen.blit(controls, (12, WIN_H - GROUND_H - 30))
+
+        pygame.display.flip()
 
     pygame.quit()
     sys.exit()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Flappy Bird - DQN")
+    parser.add_argument("--play", action="store_true", help="Skip training, load best model and play")
+    args = parser.parse_args()
+
+    if args.play:
+        play()
+        return
+
+    print("=" * 50, flush=True)
+    print("  Flappy Bird - DQN Training", flush=True)
+    print("=" * 50, flush=True)
+    train()
+    print("=" * 50, flush=True)
+    print("  Starting visual playback", flush=True)
+    print("=" * 50, flush=True)
+    play()
 
 
 if __name__ == "__main__":

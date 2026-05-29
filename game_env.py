@@ -1,34 +1,19 @@
 import pygame
 import random
-
+import os
 
 WIN_W = 1000
 WIN_H = 650
 GROUND_H = 80
-BIRD_R = 12
 PIPE_W = 70
 PIPE_GAP = 160
 PIPE_SPD = 4
 GRAVITY = 0.45
 JUMP_VEL = -7.5
 PIPE_SPAWN_GAP = 280
+BIRD_R = 12
 
-
-class Colors:
-    BG = (20, 22, 30)
-    GROUND = (40, 42, 50)
-    GROUND_LINE = (60, 62, 70)
-    PIPE = (0, 180, 60)
-    PIPE_DARK = (0, 130, 40)
-    PIPE_LIGHT = (0, 220, 80)
-    BIRD = (255, 200, 50)
-    BIRD_OUTLINE = (200, 150, 30)
-    WHITE = (255, 255, 255)
-    DARK = (15, 17, 25)
-    RED = (255, 80, 80)
-    GREEN = (80, 255, 80)
-    CYAN = (80, 200, 255)
-    GRAY = (150, 150, 150)
+SPRITES_DIR = os.path.join(os.path.dirname(__file__), "sprites_repo", "sprites")
 
 
 class Bird:
@@ -51,22 +36,6 @@ class Bird:
         self.y += self.vel
         self.frames += 1
 
-    def draw(self, screen):
-        if not self.alive:
-            return
-        cx, cy = int(self.x), int(self.y)
-        pygame.draw.circle(screen, Colors.BIRD, (cx, cy), BIRD_R)
-        pygame.draw.circle(screen, Colors.BIRD_OUTLINE, (cx, cy), BIRD_R, 2)
-        eye_x, eye_y = cx + 4, cy - 3
-        pygame.draw.circle(screen, Colors.WHITE, (eye_x, eye_y), 4)
-        pygame.draw.circle(screen, Colors.DARK, (eye_x + 1, eye_y), 2)
-        beak = [
-            (cx + BIRD_R, cy),
-            (cx + BIRD_R + 8, cy + 2),
-            (cx + BIRD_R, cy + 5),
-        ]
-        pygame.draw.polygon(screen, Colors.RED, beak)
-
 
 class Pipe:
     def __init__(self, x, prev_gap_center=None):
@@ -84,142 +53,187 @@ class Pipe:
     def update(self):
         self.x -= PIPE_SPD
 
-    def collides_with(self, bird):
-        bl = bird.x - BIRD_R
-        br = bird.x + BIRD_R
-        bt = bird.y - BIRD_R
-        bb = bird.y + BIRD_R
-        pl = self.x
-        pr = self.x + PIPE_W
-        if br > pl and bl < pr:
+    def collides_with(self, bx, by, br):
+        bl, brr = bx - br, bx + br
+        bt, bb = by - br, by + br
+        pl, pr = self.x, self.x + PIPE_W
+        if brr > pl and bl < pr:
             if bt < self.gap_top or bb > self.gap_bot:
                 return True
         return False
 
-    def draw(self, screen):
-        cap_h = 25
-        pygame.draw.rect(screen, Colors.PIPE, (self.x, 0, PIPE_W, self.gap_top))
-        pygame.draw.rect(
-            screen, Colors.PIPE_DARK, (self.x, self.gap_top - cap_h, PIPE_W, cap_h)
-        )
-        pygame.draw.rect(
-            screen, Colors.PIPE_LIGHT, (self.x, self.gap_top - cap_h, PIPE_W, 4)
-        )
-
-        bot_top = self.gap_bot
-        bot_h = WIN_H - GROUND_H - bot_top
-        pygame.draw.rect(screen, Colors.PIPE, (self.x, bot_top, PIPE_W, bot_h))
-        pygame.draw.rect(
-            screen, Colors.PIPE_DARK, (self.x, bot_top, PIPE_W, cap_h)
-        )
-        pygame.draw.rect(
-            screen, Colors.PIPE_LIGHT, (self.x, bot_top, PIPE_W, 4)
-        )
+    @property
+    def gap_center(self):
+        return (self.gap_top + self.gap_bot) // 2
 
 
-class GameEnv:
-    def __init__(self):
-        self.birds = []
+class FlappyBirdEnv:
+    def __init__(self, max_frames=6000):
+        self.max_frames = max_frames
+        self.bird = None
         self.pipes = []
         self.frame = 0
-        self.ground_scroll = 0.0
-        self.max_pipe_x = WIN_W
         self.last_gap_center = None
 
-    def add_bird(self, x, y):
-        b = Bird(x, y)
-        self.birds.append(b)
-        return b
+    def reset(self):
+        self.bird = Bird(120, WIN_H // 2)
+        self.pipes = []
+        self.frame = 0
+        self.last_gap_center = None
+        first_pipe = Pipe(220, None)
+        self.last_gap_center = first_pipe.gap_center
+        self.pipes.append(first_pipe)
+        return self._state()
 
-    @property
-    def alive_birds(self):
-        return [b for b in self.birds if b.alive]
-
-    @property
-    def alive_count(self):
-        return sum(1 for b in self.birds if b.alive)
-
-    @property
-    def all_dead(self):
-        return self.alive_count == 0
-
-    def get_next_pipe(self, bird):
+    def _next_pipe(self):
         for p in self.pipes:
-            if not p.passed and p.x + PIPE_W > bird.x:
+            if not p.passed and p.x + PIPE_W > self.bird.x:
                 return p
         return None
 
-    def update(self):
-        self.frame += 1
-        self.ground_scroll = (self.ground_scroll - PIPE_SPD) % 24
+    def _state(self):
+        pipe = self._next_pipe()
+        if pipe is None:
+            return [0.5, 0.0, 1.0, 0.5]
+        return [
+            self.bird.y / WIN_H,
+            self.bird.vel / 10,
+            (pipe.x - self.bird.x) / WIN_W,
+            pipe.gap_center / WIN_H,
+        ]
 
-        if (
-            len(self.pipes) == 0
-            or self.pipes[-1].x < WIN_W - PIPE_SPAWN_GAP
-        ):
-            new_pipe = Pipe(WIN_W, self.last_gap_center)
-            self.last_gap_center = new_pipe.gap_top + PIPE_GAP // 2
-            self.pipes.append(new_pipe)
+    def step(self, action):
+        if action == 1 and self.bird.alive:
+            self.bird.jump()
+
+        self.frame += 1
+        self.bird.update()
+
+        if len(self.pipes) == 0 or self.pipes[-1].x < WIN_W - PIPE_SPAWN_GAP:
+            np_ = Pipe(WIN_W, self.last_gap_center)
+            self.last_gap_center = np_.gap_center
+            self.pipes.append(np_)
 
         for pipe in self.pipes[:]:
             pipe.update()
             if pipe.x + PIPE_W < -20:
                 self.pipes.remove(pipe)
 
-        for bird in self.birds:
-            if bird.alive:
-                bird.update()
-                if bird.y + BIRD_R >= WIN_H - GROUND_H:
-                    bird.alive = False
-                if bird.y - BIRD_R <= 0:
-                    bird.alive = False
-            else:
-                if bird.y + BIRD_R < WIN_H - GROUND_H:
-                    bird.vel += GRAVITY
-                    bird.y += bird.vel
+        done = False
+        reward = 0.1
 
-        for bird in self.birds:
-            if not bird.alive:
-                continue
-            for pipe in self.pipes:
-                if pipe.collides_with(bird):
-                    bird.alive = False
-                    break
-                if not pipe.passed and pipe.x + PIPE_W < bird.x:
-                    bird.score += 1
-                    pipe.passed = True
-
-    def draw_bg(self, screen):
-        screen.fill(Colors.BG)
-        for i in range(60):
-            sx = int((self.frame * 0.2 + i * 137.5) % WIN_W)
-            sy = (i * 97 + 53) % (WIN_H - GROUND_H)
-            b = 160 + (i % 60)
-            screen.set_at((sx, sy), (b, b, b))
-        pygame.draw.rect(
-            screen,
-            Colors.GROUND,
-            (0, WIN_H - GROUND_H, WIN_W, GROUND_H),
-        )
-        pygame.draw.line(
-            screen,
-            Colors.GROUND_LINE,
-            (0, WIN_H - GROUND_H),
-            (WIN_W, WIN_H - GROUND_H),
-            2,
-        )
-        for i in range(0, WIN_W + 24, 24):
-            x = i - self.ground_scroll
-            pygame.draw.rect(
-                screen, Colors.GROUND_LINE, (x, WIN_H - GROUND_H + 10, 1, 5)
-            )
-            pygame.draw.rect(
-                screen, Colors.GROUND_LINE, (x + 12, WIN_H - GROUND_H + 25, 1, 5)
-            )
-
-    def draw(self, screen):
-        self.draw_bg(screen)
         for pipe in self.pipes:
-            pipe.draw(screen)
-        for bird in self.birds:
-            bird.draw(screen)
+            if not pipe.passed and pipe.x + PIPE_W < self.bird.x:
+                self.bird.score += 1
+                pipe.passed = True
+                reward += 10
+
+        if self.bird.y + BIRD_R >= WIN_H - GROUND_H or self.bird.y - BIRD_R <= 0:
+            self.bird.alive = False
+            done = True
+        elif self.max_frames is not None and self.frame >= self.max_frames:
+            done = True
+        else:
+            for pipe in self.pipes:
+                if pipe.collides_with(self.bird.x, self.bird.y, BIRD_R):
+                    self.bird.alive = False
+                    done = True
+                    break
+
+        if done:
+            if self.max_frames is not None and self.frame >= self.max_frames:
+                reward = self.bird.score * 10 + 10
+            else:
+                reward = -1
+
+        return self._state(), reward, done, {"score": self.bird.score}
+
+
+def load_sprites():
+    try:
+        bg = pygame.image.load(os.path.join(SPRITES_DIR, "background-day.png"))
+        bg = pygame.transform.scale(bg, (WIN_W, WIN_H - GROUND_H))
+        ground = pygame.image.load(os.path.join(SPRITES_DIR, "base.png"))
+        ground = pygame.transform.scale(ground, (WIN_W + 48, GROUND_H))
+        pipe_img = pygame.image.load(os.path.join(SPRITES_DIR, "pipe-green.png"))
+        pipe_head_h = min(30, pipe_img.get_height() // 3)
+        pipe_head = pipe_img.subsurface((0, 0, pipe_img.get_width(), pipe_head_h))
+        pipe_body = pipe_img.subsurface((0, pipe_head_h, pipe_img.get_width(), pipe_img.get_height() - pipe_head_h))
+        pipe_head = pygame.transform.scale(pipe_head, (PIPE_W, int(pipe_head_h * PIPE_W / pipe_img.get_width())))
+        pipe_head_h_scaled = pipe_head.get_height()
+        bird_imgs = [
+            pygame.image.load(os.path.join(SPRITES_DIR, "yellowbird-upflap.png")),
+            pygame.image.load(os.path.join(SPRITES_DIR, "yellowbird-midflap.png")),
+            pygame.image.load(os.path.join(SPRITES_DIR, "yellowbird-downflap.png")),
+        ]
+        bird_scale = 1.8
+        bird_sz = (int(bird_imgs[0].get_width() * bird_scale), int(bird_imgs[0].get_height() * bird_scale))
+        bird_imgs = [pygame.transform.scale(b, bird_sz) for b in bird_imgs]
+        nums = {}
+        for i in range(10):
+            img = pygame.image.load(os.path.join(SPRITES_DIR, f"{i}.png"))
+            nums[i] = img
+        return {
+            "bg": bg,
+            "ground": ground,
+            "pipe_head": pipe_head,
+            "pipe_head_h": pipe_head_h_scaled,
+            "pipe_body": pipe_body,
+            "bird_imgs": bird_imgs,
+            "nums": nums,
+        }
+    except Exception as e:
+        print(f"Sprite loading failed ({e}), using colored rendering")
+        return None
+
+
+def draw_sprite_frame(screen, env, sprites):
+    s = sprites
+    screen.blit(s["bg"], (0, 0))
+
+    ground_scroll = (env.frame * PIPE_SPD) % (WIN_W + 48)
+    screen.blit(s["ground"], (-ground_scroll, WIN_H - GROUND_H))
+    screen.blit(s["ground"], (-ground_scroll + WIN_W + 48, WIN_H - GROUND_H))
+
+    pipe_body = s["pipe_body"]
+    pipe_head = s["pipe_head"]
+    pipe_head_h = s["pipe_head_h"]
+
+    for pipe in env.pipes:
+        top_h = pipe.gap_top
+        body_h = top_h - pipe_head_h
+        if body_h > 0:
+            body_scaled = pygame.transform.scale(pipe_body, (PIPE_W, body_h))
+            body_scaled = pygame.transform.flip(body_scaled, False, True)
+            screen.blit(body_scaled, (pipe.x, 0))
+        head_flipped = pygame.transform.flip(pipe_head, False, True)
+        screen.blit(head_flipped, (pipe.x, top_h - pipe_head_h))
+
+        bot_top = pipe.gap_bot
+        bot_h = WIN_H - GROUND_H - bot_top
+        body_h_bot = bot_h - pipe_head_h
+        screen.blit(pipe_head, (pipe.x, bot_top))
+        if body_h_bot > 0:
+            body_scaled = pygame.transform.scale(pipe_body, (PIPE_W, body_h_bot))
+            screen.blit(body_scaled, (pipe.x, bot_top + pipe_head_h))
+
+    if env.bird:
+        bird_idx = 1
+        if env.bird.vel < -2:
+            bird_idx = 0
+        elif env.bird.vel > 2:
+            bird_idx = 2
+        bird_img = s["bird_imgs"][bird_idx]
+        if not env.bird.alive:
+            bird_img = s["bird_imgs"][2]
+        bw, bh = bird_img.get_size()
+        screen.blit(bird_img, (env.bird.x - bw // 2, env.bird.y - bh // 2))
+
+
+def draw_score(screen, score, sprites):
+    digits = [int(d) for d in str(score)]
+    total_w = sum(sprites["nums"][d].get_width() for d in digits)
+    x = (WIN_W - total_w) // 2
+    for d in digits:
+        screen.blit(sprites["nums"][d], (x, 50))
+        x += sprites["nums"][d].get_width()
